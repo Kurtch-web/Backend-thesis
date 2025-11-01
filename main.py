@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import FRONTEND_ORIGIN
 from app.db import init_models
-from app.routers import auth, chat, presence, system, user, community, notifications
+from app.routers import auth, chat, presence, system, user, community, notifications, flashcards
 
 app = FastAPI(title='Presence Tracking Service', version='0.2.0')
 
@@ -32,6 +32,7 @@ app.include_router(system.router)
 app.include_router(user.router)
 app.include_router(community.router)
 app.include_router(notifications.router)
+app.include_router(flashcards.router)
 
 
 if __name__ == '__main__':

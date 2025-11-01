@@ -20,6 +20,7 @@ from ..models import (
     CommunityTag,
     Notification,
     UserAccount,
+    UserProfile,
 )
 from ..schemas import (
     CommunityAttachmentOut,
@@ -182,14 +183,41 @@ async def list_posts(
     db: AsyncSession = Depends(get_db),
     limit: int = 20,
     before: Optional[datetime] = None,
+    q: Optional[str] = None,
+    sort: Optional[str] = 'latest',
 ) -> CommunityFeedResponse:
     if limit > 100:
         limit = 100
 
-    query = select(CommunityPost).options(selectinload(CommunityPost.attachments), selectinload(CommunityPost.tags), selectinload(CommunityPost.meta))
-    if before is not None:
-        query = query.where(CommunityPost.created_at < before)
-    query = query.order_by(CommunityPost.created_at.desc()).limit(limit + 1)
+    sort = (sort or 'latest').lower()
+    if sort not in {'latest', 'oldest', 'most_liked', 'random'}:
+        sort = 'latest'
+
+    # Base query with eager loads
+    query = select(CommunityPost).options(
+        selectinload(CommunityPost.attachments),
+        selectinload(CommunityPost.tags),
+        selectinload(CommunityPost.meta)
+    )
+
+    # Optional text search (simple)
+    if q:
+        query = query.where(CommunityPost.body.ilike(f'%{q}%'))
+
+    # Sorting and pagination
+    if sort == 'latest':
+        if before is not None:
+            query = query.where(CommunityPost.created_at < before)
+        query = query.order_by(CommunityPost.created_at.desc()).limit(limit + 1)
+    elif sort == 'oldest':
+        query = query.order_by(CommunityPost.created_at.asc()).limit(limit + 1)
+    elif sort == 'most_liked':
+        from sqlalchemy import func as _func
+        like_counts = select(CommunityLike.post_id, _func.count(CommunityLike.id).label('lc')).group_by(CommunityLike.post_id).subquery()
+        query = query.outerjoin(like_counts, CommunityPost.id == like_counts.c.post_id).order_by(like_counts.c.lc.desc().nullslast(), CommunityPost.created_at.desc()).limit(limit + 1)
+    else:  # random
+        from sqlalchemy import func as _func
+        query = query.order_by(_func.random()).limit(limit + 1)
 
     result = await db.execute(query)
     rows = result.scalars().unique().all()
@@ -245,7 +273,8 @@ async def list_posts(
             )
         )
 
-    next_cursor = items[-1].createdAt if has_more and items else None
+    # Only provide cursor when using 'latest' sort; others return a single page (no cursor)
+    next_cursor = items[-1].createdAt if (sort == 'latest' and has_more and items) else None
     return CommunityFeedResponse(posts=items, nextCursor=next_cursor)
 
 
@@ -596,3 +625,107 @@ async def report_post(
         db.add(Notification(user_id=uid, type='community_post_reported', data={'postId': post_id, 'author': author_username, 'category': payload.category}))
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get('/community/search/users', response_model=Dict[str, List[Dict]])
+async def search_users(
+    q: Optional[str] = None,
+    limit: int = 20,
+    session: Session = Depends(require_session),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, List[Dict]]:
+    if not q:
+        return {'users': []}
+
+    if limit > 100:
+        limit = 100
+
+    query = select(UserAccount).where(UserAccount.username.ilike(f'%{q}%')).limit(limit)
+    result = await db.execute(query)
+    users = result.scalars().all()
+
+    return {'users': [{'username': u.username, 'role': u.role} for u in users]}
+
+
+@router.get('/community/users/{username}', response_model=Dict[str, object])
+async def get_user_profile(
+    username: str,
+    session: Session = Depends(require_session),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, object]:
+    user = await db.scalar(select(UserAccount).where(UserAccount.username == username))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
+    profile = await db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
+
+    profile_data = {
+        'username': user.username,
+        'role': user.role,
+        'email': profile.email if profile else None,
+        'emailVerifiedAt': profile.email_verified_at if profile else None,
+        'phoneE164': profile.phone_e164 if profile else None,
+        'phoneVerifiedAt': profile.phone_verified_at if profile else None,
+        'firstName': profile.first_name if profile else None,
+        'lastName': profile.last_name if profile else None,
+        'displayName': profile.display_name if profile else None,
+        'avatarUrl': profile.avatar_url if profile else None,
+        'bio': profile.bio if profile else None,
+        'timezone': profile.timezone if profile else None,
+    }
+
+    result = await db.execute(
+        select(CommunityPost)
+        .options(selectinload(CommunityPost.attachments), selectinload(CommunityPost.tags), selectinload(CommunityPost.meta))
+        .where(CommunityPost.author_id == user.id)
+        .order_by(CommunityPost.created_at.desc())
+        .limit(100)
+    )
+    posts = result.scalars().unique().all()
+
+    pid_list = [p.id for p in posts]
+
+    like_counts = {}
+    my_likes = set()
+    comment_counts = {}
+
+    current_user = await _get_user(session, db)
+
+    if pid_list:
+        res = await db.execute(select(CommunityLike.post_id, func.count(CommunityLike.id)).where(CommunityLike.post_id.in_(pid_list)).group_by(CommunityLike.post_id))
+        like_counts = {pid: int(count) for pid, count in res.tuples().all()}
+
+        res = await db.execute(select(CommunityLike.post_id).join(UserAccount, UserAccount.id == CommunityLike.user_id).where(CommunityLike.post_id.in_(pid_list), UserAccount.id == current_user.id))
+        my_likes = {pid for (pid,) in res.tuples().all()}
+
+        res = await db.execute(select(CommunityComment.post_id, func.count(CommunityComment.id)).where(CommunityComment.post_id.in_(pid_list)).group_by(CommunityComment.post_id))
+        comment_counts = {pid: int(count) for pid, count in res.tuples().all()}
+
+    posts_out = []
+    for p in posts:
+        is_archived = bool(p.meta.archived) if p.meta else False
+        updated_at = p.meta.updated_at if p.meta else None
+        me_is_author = current_user.id == p.author_id
+        can_edit = me_is_author or session.role == 'admin'
+        can_archive = can_edit
+        can_delete = can_edit
+        can_report = not me_is_author
+        posts_out.append(
+            _post_out(
+                p,
+                user.username,
+                like_counts.get(p.id, 0),
+                p.id in my_likes,
+                comment_counts.get(p.id, 0),
+                attachments=p.attachments,
+                tags=[t.display_name for t in (p.tags or [])],
+                is_archived=is_archived,
+                updated_at=updated_at,
+                can_edit=can_edit,
+                can_archive=can_archive,
+                can_delete=can_delete,
+                can_report=can_report,
+            )
+        )
+
+    return {'profile': profile_data, 'posts': posts_out}

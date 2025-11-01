@@ -221,3 +221,16 @@ class Notification(Base):
     data: Mapped[dict] = mapped_column(JSON, default=dict, server_default='{}')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Flashcard(Base):
+    __tablename__ = 'flashcards'
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    uploader_id: Mapped[int] = mapped_column(ForeignKey('user_accounts.id', ondelete='CASCADE'), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    category: Mapped[str] = mapped_column(String(128))
+    storage_path: Mapped[str] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    uploader: Mapped[UserAccount] = relationship('UserAccount')

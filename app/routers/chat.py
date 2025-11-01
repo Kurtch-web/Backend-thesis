@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func, select
@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from ..db import get_db
 from ..dependencies import require_session
 from ..models import Conversation, MessageRead, MessageRow, Participant
-from ..schemas import ConversationOut, MessageOut, ParticipantRef, SendMessagePayload
+from ..schemas import ConversationOut, MessageOut, ParticipantRef, SendMessagePayload, OpenConversationPayload
 from ..services.sessions import Session
 
 router = APIRouter()
@@ -18,7 +18,7 @@ router = APIRouter()
 async def _ensure_conversation(db: AsyncSession, participants: List[ParticipantRef]) -> Conversation:
     names = sorted({p.username for p in participants})
     key = '|'.join(names)
-    existing = await db.execute(select(Conversation).where(Conversation.key == key))
+    existing = await db.execute(select(Conversation).options(selectinload(Conversation.participants)).where(Conversation.key == key))
     convo = existing.scalar_one_or_none()
     if convo:
         return convo
@@ -28,7 +28,7 @@ async def _ensure_conversation(db: AsyncSession, participants: List[ParticipantR
     for participant in participants:
         db.add(Participant(conversation_id=convo.id, username=participant.username, role=participant.role))
     await db.commit()
-    await db.refresh(convo)
+    await db.refresh(convo, ['participants'])
     return convo
 
 
@@ -51,15 +51,15 @@ def _conversation_to_out(row: tuple[Conversation, MessageRow | None, int]) -> Co
 
 @router.post('/chat/conversations/open')
 async def open_conversation(
-    payload: Dict[str, List[ParticipantRef]],
+    payload: OpenConversationPayload,
     session: Session = Depends(require_session),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, ConversationOut]:
-    participants = payload.get('participants') or []
+    participants = payload.participants
     if not any(p.username == session.username for p in participants):
         participants = participants + [ParticipantRef(username=session.username, role=session.role)]
     convo = await _ensure_conversation(db, participants)
-    await db.refresh(convo)
+    await db.refresh(convo, ['participants'])
     return {'conversation': _conversation_to_out((convo, None, 0))}
 
 
@@ -94,7 +94,6 @@ async def list_conversations(
             )
         )
         unread = int(unread_query.scalar() or 0)
-        await db.refresh(conversation)
         output.append(_conversation_to_out((conversation, last_message, unread)))
     output.sort(
         key=lambda item: item.lastMessageAt or datetime.min.replace(tzinfo=timezone.utc),

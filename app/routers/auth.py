@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from ..config import SESSION_TTL_MINUTES
-from ..dependencies import get_event_store, get_session_manager, get_user_store, require_session
-from ..schemas import LoginPayload, LoginResponse, SignupPayload, SignupResponse
+from ..dependencies import get_event_store, get_profile_store, get_session_manager, get_user_store, require_session
+from ..schemas import LoginPayload, LoginResponse, PasswordResetConfirm, PasswordResetRequest, PasswordResetVerify, SignupPayload, SignupResponse
 from ..services.events import EventStore
+from ..services.profiles import ProfileStore
 from ..services.sessions import Session, SessionManager
 from ..services.users import UserStore
 
@@ -56,3 +57,77 @@ async def logout(
     response.delete_cookie('session_token')
     response.delete_cookie('session_role')
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post('/auth/request-password-reset', status_code=status.HTTP_204_NO_CONTENT)
+async def request_password_reset(
+    payload: PasswordResetRequest,
+    user_store: UserStore = Depends(get_user_store),
+    profile_store: ProfileStore = Depends(get_profile_store),
+) -> Response:
+    """Request a password reset code for an email address"""
+    # Find user by email
+    async with user_store._session_factory() as session:
+        from sqlalchemy import select
+        from ..models import UserProfile, UserAccount
+        profile = await session.scalar(select(UserProfile).where(UserProfile.email.ilike(payload.email.strip())))
+        if not profile:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Email not found')
+        user = await session.scalar(select(UserAccount).where(UserAccount.id == profile.user_id))
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
+    # Request password reset code using profile store
+    await profile_store.request_password_reset(payload.email)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post('/auth/verify-password-reset', response_model=dict)
+async def verify_password_reset(
+    payload: PasswordResetVerify,
+    profile_store: ProfileStore = Depends(get_profile_store),
+) -> dict:
+    """Verify password reset code"""
+    is_valid = await profile_store.verify_password_reset_code(payload.email, payload.code)
+    if not is_valid:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid or expired code')
+    return {'valid': True, 'message': 'Code verified successfully'}
+
+
+@router.post('/auth/reset-password', response_model=dict)
+async def reset_password(
+    payload: PasswordResetConfirm,
+    user_store: UserStore = Depends(get_user_store),
+    profile_store: ProfileStore = Depends(get_profile_store),
+) -> dict:
+    """Reset password with verified code"""
+    # Verify code first
+    is_valid = await profile_store.verify_password_reset_code(payload.email, payload.code)
+    if not is_valid:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid or expired code')
+
+    # Find user by email and update password
+    async with user_store._session_factory() as session:
+        from sqlalchemy import select, update
+        from ..models import UserProfile, UserAccount
+        from ..security import hash_password
+
+        profile = await session.scalar(select(UserProfile).where(UserProfile.email.ilike(payload.email.strip())))
+        if not profile:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Email not found')
+
+        user = await session.scalar(select(UserAccount).where(UserAccount.id == profile.user_id))
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
+        # Update password
+        user.password_hash = hash_password(payload.new_password)
+
+        # Clear reset codes
+        profile.verify_email_code_hash = None
+        profile.verify_expires_at = None
+        profile.verify_requested_at = None
+
+        await session.commit()
+
+    return {'message': 'Password reset successfully'}

@@ -50,6 +50,21 @@ class SignupPayload(BaseModel):
     password: str = Field(min_length=6, max_length=128)
 
 
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+
+
+class PasswordResetVerify(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    code: str = Field(min_length=6, max_length=6)
+
+
+class PasswordResetConfirm(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    code: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
 class SignupResponse(BaseModel):
     username: str
     message: str
@@ -201,3 +216,8 @@ class NotificationOut(BaseModel):
 
 class NotificationList(BaseModel):
     notifications: List[NotificationOut]
+
+
+# Chat API
+class OpenConversationPayload(BaseModel):
+    participants: List[ParticipantRef]
