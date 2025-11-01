@@ -1,0 +1,86 @@
+name: Frontend CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-ci.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'frontend/**'
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      
+      - name: Install pnpm
+        run: npm install -g pnpm
+      
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: pnpm install
+      
+      - name: Run ESLint
+        working-directory: ./frontend
+        run: pnpm run lint
+        continue-on-error: true
+      
+      - name: Check TypeScript
+        working-directory: ./frontend
+        run: pnpm exec tsc --noEmit
+      
+      - name: Build for production
+        working-directory: ./frontend
+        run: pnpm run build
+        env:
+          VITE_API_BASE: https://backend-thesis-1.onrender.com
+      
+      - name: Verify build output
+        run: |
+          if [ -d "frontend/dist" ]; then
+            echo "✅ Build successful! Output directory: frontend/dist"
+            ls -lah frontend/dist
+          else
+            echo "❌ Build failed! dist directory not found"
+            exit 1
+          fi
+
+  security-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'pnpm'
+      
+      - name: Install pnpm
+        run: npm install -g pnpm
+      
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: pnpm install
+      
+      - name: Audit dependencies
+        working-directory: ./frontend
+        run: pnpm audit --audit-level=moderate
+        continue-on-error: true
